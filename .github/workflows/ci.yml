@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:                 # also runs when a PR is opened
+    branches: [main]
+
+jobs:
+  test:                         # runs in parallel with build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pytest
+
+  build:                        # no "needs", so parallel with test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker build -t flaskapp .
+
+  push:
+    needs: [test, build]        # waits for both
+    if: success() && github.event_name == 'push'   # only if they pass, never on a PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write           # needed for GHCR
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker build -t flaskapp .   # each job is a new machine, so rebuild
+      - name: Push to Docker Hub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+          docker tag flaskapp "$DOCKER_USERNAME/flaskapp:latest"
+          docker push "$DOCKER_USERNAME/flaskapp:latest"
+      - name: Push to second registry (GHCR)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag flaskapp "$IMAGE"
+          docker push "$IMAGE"
+
+  notify:
+    needs: test
+    if: failure()               # only if test failed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dawidd6/action-send-mail@v16
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "Tests failed: ${{ github.repository }}"
+          to: ${{ secrets.MAIL_USERNAME }}
+          from: GitHub Actions
+          body: "See ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
